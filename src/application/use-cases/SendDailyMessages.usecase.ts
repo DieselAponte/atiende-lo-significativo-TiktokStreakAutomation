@@ -3,8 +3,10 @@ import type { IConversationReader } from '#application/ports/IConversationReader
 import type { IMessageProvider } from '#application/ports/IMessageProvider.js';
 import type { IMessageGenerator } from '#application/ports/IMessageGenerator.js';
 import type { IMessageSender } from '#application/ports/IMessageSender.js';
+import type { SendMessageResultDto } from '#application/dto/SendMessageResult.dto.js';
 import type { IMessageRepository } from '#application/ports/IMessageRepository.js';
 import type { IConversationRepository } from '#application/ports/IConversationRepository.js';
+import type { Conversation } from '#domain/entities/Conversation.js';
 import { EligibilityService } from '#application/services/EligibilityService.js';
 import { MessageSelectionService } from '#application/services/MessageSelectionService.js';
 import { IntroductionMessageService } from '#application/services/IntroductionMessageService.js';
@@ -15,9 +17,11 @@ import { SendStatus } from '#domain/enums/SendStatus.js';
 import type { ILogger } from '#application/ports/ILogger.js';
 
 /**
- * Primary application use case orchestrating the daily streak message automation workflow.
+ * Primary application use case orchestrating the daily streak message automation workflow with idempotency and retry resilience.
  */
 export class SendDailyMessagesUseCase {
+  private readonly maxRetries = 3;
+
   public constructor(
     private readonly conversationReader: IConversationReader,
     private readonly eligibilityService: EligibilityService,
@@ -34,11 +38,11 @@ export class SendDailyMessagesUseCase {
   public async execute(): Promise<DailyExecutionResultDto> {
     const startTime = Date.now();
     const executedAt = new Date();
-    this.logger?.info('Starting daily streak messages automation workflow.');
+    this.logger?.info('[JOB_STARTED] Starting daily streak messages automation workflow.');
 
     const isSessionActive = await this.eligibilityService.isSessionValid();
     if (!isSessionActive) {
-      this.logger?.error('Automation session is invalid or expired. Aborting daily execution.');
+      this.logger?.error('[JOB_FAILED] Automation session is invalid or expired. Aborting daily execution.');
       return {
         processedConversations: 0,
         sentMessages: 0,
@@ -57,9 +61,22 @@ export class SendDailyMessagesUseCase {
 
     for (const conversation of streakConversations) {
       processedConversations++;
+      const contactId = conversation.contact.id.getValue();
 
       if (!this.eligibilityService.isEligible(conversation, executedAt)) {
         skippedConversations++;
+        this.logger?.info(`[MESSAGE_SKIPPED] Contact: ${contactId}, Reason: Not eligible for streak message.`);
+        continue;
+      }
+
+      // Idempotency Check: Verify if contact has already received a message today
+      const alreadyReceivedToday = await this.messageRepository.hasReceivedMessageToday(
+        conversation.id,
+        executedAt,
+      );
+      if (alreadyReceivedToday) {
+        skippedConversations++;
+        this.logger?.info(`[MESSAGE_SKIPPED] Contact: ${contactId}, Reason: Already received message today.`);
         continue;
       }
 
@@ -69,7 +86,7 @@ export class SendDailyMessagesUseCase {
 
         if (!hasIntro) {
           this.logger?.info(
-            `Conversation ${conversation.id.getValue()} has not received introduction. Generating intro message.`,
+            `Conversation ${conversation.id.getValue()} has not received introduction. Building intro message.`,
           );
           const introContent = this.introductionMessageService.buildIntroductionContent(conversation);
           messageToSend = Message.create({
@@ -87,18 +104,19 @@ export class SendDailyMessagesUseCase {
           messageToSend = await this.messageGenerator.generateForConversation(conversation, selectedType);
         }
 
-        const sendResult = await this.messageSender.sendMessage(conversation, messageToSend);
+        // Retry Strategy (max 3 retries for temporary failures)
+        const sendResult = await this.sendMessageWithRetry(conversation, messageToSend);
 
         if (sendResult.success) {
           messageToSend.markAsSent(sendResult.sentAt ?? new Date());
           conversation.recordMessageSent(messageToSend.sentAt);
           sentMessages++;
-          this.logger?.info(`Successfully sent streak message to conversation ${conversation.id.getValue()}.`);
+          this.logger?.info(`[MESSAGE_SENT] Contact: ${contactId}, Conversation: ${conversation.id.getValue()}`);
         } else {
-          messageToSend.markAsFailed(sendResult.errorMessage ?? 'Failed to deliver message.');
+          messageToSend.markAsFailed(sendResult.errorMessage ?? 'Failed to deliver message after retries.');
           failedMessages++;
           this.logger?.warn(
-            `Failed to send message to conversation ${conversation.id.getValue()}: ${sendResult.errorMessage}`,
+            `[MESSAGE_FAILED] Contact: ${contactId}, Reason: ${sendResult.errorMessage}`,
           );
         }
 
@@ -108,13 +126,13 @@ export class SendDailyMessagesUseCase {
         }
       } catch (err) {
         failedMessages++;
-        this.logger?.error(`Error processing conversation ${conversation.id.getValue()}`, err);
+        this.logger?.error(`[MESSAGE_FAILED] Unexpected error processing contact: ${contactId}`, err);
       }
     }
 
     const durationMs = Date.now() - startTime;
     this.logger?.info(
-      `Daily execution complete. Processed: ${processedConversations}, Sent: ${sentMessages}, Failed: ${failedMessages}, Skipped: ${skippedConversations}.`,
+      `[JOB_COMPLETED] Processed: ${processedConversations}, Sent: ${sentMessages}, Failed: ${failedMessages}, Skipped: ${skippedConversations}.`,
     );
 
     return {
@@ -125,5 +143,49 @@ export class SendDailyMessagesUseCase {
       executedAt,
       durationMs,
     };
+  }
+
+  private async sendMessageWithRetry(
+    conversation: Conversation,
+    message: Message,
+  ): Promise<SendMessageResultDto> {
+    let lastResult: SendMessageResultDto = {
+      conversationId: conversation.id.getValue(),
+      messageId: message.id.getValue(),
+      success: false,
+      errorMessage: 'Initial state',
+    };
+
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try {
+        lastResult = await this.messageSender.sendMessage(conversation, message);
+        if (lastResult.success) {
+          return lastResult;
+        }
+
+        // Check if error is permanent (e.g. invalid session, deleted user, blocked)
+        const isPermanentError =
+          lastResult.errorMessage?.includes('invalid session') ||
+          lastResult.errorMessage?.includes('user deleted') ||
+          lastResult.errorMessage?.includes('blocked');
+
+        if (isPermanentError) {
+          this.logger?.warn(`Permanent error encountered on attempt ${attempt}. Stopping retries.`);
+          return lastResult;
+        }
+
+        this.logger?.warn(`Temporary send error on attempt ${attempt}/${this.maxRetries}. Retrying...`);
+      } catch (err) {
+        lastResult = {
+          conversationId: conversation.id.getValue(),
+          messageId: message.id.getValue(),
+          success: false,
+          errorMessage: err instanceof Error ? err.message : String(err),
+        };
+        this.logger?.warn(`Exception on attempt ${attempt}/${this.maxRetries}: ${lastResult.errorMessage}`);
+      }
+    }
+
+    return lastResult;
   }
 }
