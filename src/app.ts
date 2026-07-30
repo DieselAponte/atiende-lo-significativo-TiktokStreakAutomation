@@ -12,12 +12,14 @@ import { ScienceCompositeProvider } from '#providers/science/science.provider.js
 import { EligibilityService } from '#application/services/EligibilityService.js';
 import { MessageSelectionService } from '#application/services/MessageSelectionService.js';
 import { IntroductionMessageService } from '#application/services/IntroductionMessageService.js';
+import { MessagePipeline } from '#application/services/MessagePipeline.js';
+import { ProviderSelectionService } from '#application/services/ProviderSelectionService.js';
+import { TemplateRegistry } from '#templates/registry/TemplateRegistry.js';
 import { SendDailyMessagesUseCase } from '#application/use-cases/SendDailyMessages.usecase.js';
 import { CronScheduler } from '#scheduler/cron.js';
 import { DailyScheduler } from '#scheduler/dailyScheduler.js';
 import { InMemorySchedulerLock } from '#scheduler/scheduler.lock.js';
 import type { ILogger } from '#application/ports/ILogger.js';
-import type { IMessageProvider } from '#application/ports/IMessageProvider.js';
 import type { IMessageGenerator } from '#application/ports/IMessageGenerator.js';
 import { Message } from '#domain/entities/Message.js';
 import { MessageId } from '#domain/value-objects/MessageId.js';
@@ -54,37 +56,31 @@ export function createApp(): ApplicationInstance {
   const philosophyProvider = new WikiquotePhilosophyProvider();
   const scienceProvider = new ScienceCompositeProvider(undefined, logger);
 
-  // Composite Application MessageProvider adapter
-  const compositeMessageProvider: IMessageProvider = {
-    async getMessageContent(type: MessageType): Promise<string> {
-      if (type === MessageType.PHILOSOPHY) {
-        const item = await philosophyProvider.fetchContent();
-        return item.content;
-      }
-      if (type === MessageType.SCIENCE) {
-        const item = await scienceProvider.fetchContent();
-        return item.content;
-      }
-      const item = await curiosityProvider.fetchContent();
-      return item.content;
-    },
+  // Decoupled ProviderSelectionService
+  const providerSelectionService = new ProviderSelectionService({
+    [MessageType.CURIOSITY]: curiosityProvider,
+    [MessageType.PHILOSOPHY]: philosophyProvider,
+    [MessageType.SCIENCE]: scienceProvider,
+  });
 
-    async getAvailableContents(type: MessageType): Promise<string[]> {
-      const content = await this.getMessageContent(type);
-      return [content];
-    },
-  };
+  // Message Pipeline & Template Registry
+  const messagePipeline = new MessagePipeline();
+  const templateRegistry = new TemplateRegistry();
 
-  // Message Generator Adapter
+  // Message Generator Adapter orchestrating Provider -> Pipeline -> Template
   const messageGenerator: IMessageGenerator = {
     async generateForConversation(conversation, selectedType) {
       const type = selectedType ?? MessageType.CURIOSITY;
-      const contentText = await compositeMessageProvider.getMessageContent(type);
+      const rawContent = await providerSelectionService.fetchContent(type);
+      const sanitizedContent = messagePipeline.process(rawContent);
+      const renderer = templateRegistry.getRenderer(sanitizedContent.category);
+      const formattedText = renderer.render(sanitizedContent, conversation);
+
       return Message.create({
         id: MessageId.generate(),
         conversationId: conversation.id,
         type,
-        content: contentText,
+        content: formattedText,
         status: SendStatus.PENDING,
       });
     },
@@ -100,7 +96,7 @@ export function createApp(): ApplicationInstance {
     eligibilityService,
     messageSelectionService,
     introductionMessageService,
-    compositeMessageProvider,
+    providerSelectionService,
     messageGenerator,
     messageSenderAdapter,
     messageRepository,

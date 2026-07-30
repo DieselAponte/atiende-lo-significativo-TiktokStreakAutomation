@@ -1,16 +1,17 @@
-import { MessageType } from '#domain/enums/MessageType.js';
+import type { MessageContent } from '#providers/base/MessageContent.model.js';
+import type { MessageType } from '#domain/enums/MessageType.js';
 
 /**
- * Port interface contract for retrieving message content items by type (Curiosity, Philosophy, Science).
+ * Single application port interface contract for retrieving structured MessageContent items from content providers.
  */
 export interface IMessageProvider {
   /**
-   * Retrieves a single candidate message content for the given category.
+   * Fetches a candidate MessageContent item for the specified category or default.
    */
-  getMessageContent(type: MessageType): Promise<string>;
+  fetchContent(category?: MessageType | string): Promise<MessageContent>;
 
   /**
-   * Retrieves all available message contents for the given category.
+   * Optional method to fetch multiple candidate MessageContent items.
    */
-  getAvailableContents(type: MessageType): Promise<string[]>;
+  fetchAvailableContents?(category?: MessageType | string): Promise<MessageContent[]>;
 }
