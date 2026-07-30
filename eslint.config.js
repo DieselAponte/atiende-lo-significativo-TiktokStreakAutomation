@@ -25,6 +25,7 @@ export default tseslint.config(
       'generated/',
       'coverage/',
       'eslint.config.js',
+      'eslint-loader.cjs',
     ],
   },
 );
