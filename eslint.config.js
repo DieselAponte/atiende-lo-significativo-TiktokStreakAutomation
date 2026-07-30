@@ -23,6 +23,8 @@ export default tseslint.config(
       'dist/',
       'node_modules/',
       'generated/',
+      'src/database/generated/',
+      '**/generated/**',
       'coverage/',
       'eslint.config.js',
       'eslint-loader.cjs',

@@ -50,7 +50,8 @@ docker-compose.override.yml
 
 # Misc
 *.pid
-/generated/prisma
+src/database/generated/prisma
+generated/prisma
 .claude
 .agents
 .windsurf
