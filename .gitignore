@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+coverage/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Database
+*.sqlite
+*.sqlite3
+database/*.db
+
+# Playwright
+playwright-report/
+test-results/
+
+# Cache
+.cache/
+.tmp/
+temp/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PM2
+.pm2/
+
+# TypeScript
+*.tsbuildinfo
+
+# Docker
+docker-compose.override.yml
+
+# Misc
+*.pid
+/generated/prisma
+.claude
+.agents
+.windsurf
+skills-lock.json
